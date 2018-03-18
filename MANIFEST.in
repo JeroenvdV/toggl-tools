@@ -1,0 +1,4 @@
+include toggl-tools/config.yml
+include toggl-tools/config.yml.example
+include toggl-tools/project-mappings.json
+include toggl-tools/project-mappings.json.example

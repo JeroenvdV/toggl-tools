@@ -1,0 +1,20 @@
+[
+  {
+    "source_workspace": 12345,
+    "dest_workspace": 23456,
+    "mapped_projects": [
+      {
+        "source_project": 2345,
+        "dest_project": 3456,
+        "dest_billability": null,
+        "distribution_factor": 1.0
+      },
+      {
+        "source_project": 2345,
+        "dest_project": 3456,
+        "dest_billability": null,
+        "distribution_factor": 1.0
+      }
+    ]
+  }
+]
