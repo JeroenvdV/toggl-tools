@@ -32,6 +32,7 @@ setup(
     install_requires=[
         'pyyaml',
         'python-dateutil',
+        'pytimeparse',
         'TogglPy'
     ],
     zip_safe=False

@@ -4,6 +4,8 @@ from datetime import datetime, timezone, timedelta
 
 import dateutil.parser
 from TogglPy import TogglPy
+from pytimeparse.timeparse import timeparse
+
 from .settings import YAMLSettings
 
 
@@ -15,7 +17,7 @@ class TogglTools:
 
         arg_parser.add_argument('--source-workspace', '-s', help='Workspace ID to use as the source')
         arg_parser.add_argument('--dest-workspace', '-w', help='Workspace ID to use as the destination')
-        arg_parser.add_argument('--start-date', '-d', help='Starting date for the query in YYYYMMDD format')
+        arg_parser.add_argument('--start-date', '-d', help='(Starting) date for the query in YYYYMMDD format')
 
         self.args = arg_parser.parse_args()
         self.cfg = YAMLSettings()
@@ -25,17 +27,33 @@ class TogglTools:
 
         getattr(self, self.args.command)()
 
-    def copy(self):
+    # Find a time entry and split it into multiple time entries on the same workspace.
+    # Uses the start date as a specific date.
+    def split(self):
+        if self.args.dest_workspace is None:
+            self._list_clients()
+        else:
+            if self.args.start_date is None:
+                print('Give a start date.')
+            else:
+                date = None
+                try:
+                    date = datetime.strptime(self.args.start_date, '%Y%m%d')
+                except ValueError:
+                    print('Date not in YYYYMMDD format.')
+                    return
+                self._split(date, int(self.args.dest_workspace))
 
+    def copy(self):
         project_mappings = []
         try:
             project_mappings = json.load(open('project-mappings.json'))
         except IOError:
             print('Error opening project mappings file (project-mappings.json).')
-            exit()
+            return
         except (json.decoder.JSONDecodeError, TypeError):
             print('Error decoding contents of project-mappings.json.')
-            exit()
+            return
 
         if self.args.source_workspace is None or self.args.dest_workspace is None:
             self._list_clients()
@@ -48,7 +66,7 @@ class TogglTools:
                     start_date = datetime.strptime(self.args.start_date, '%Y%m%d')
                 except ValueError:
                     print('Date not in YYYYMMDD format.')
-                    exit()
+                    return
 
                 source_workspace_id = int(self.args.source_workspace)
                 dest_workspace_id = int(self.args.dest_workspace)
@@ -58,15 +76,14 @@ class TogglTools:
                     project_mappings))
                 if len(relevant_mapping) > 1:
                     print('Multiple relevant project mappings for these workspaces.')
-                    exit()
+                    return
                 if len(relevant_mapping) < 1:
                     print('No relevant project mappings for these workspaces.')
-                    exit()
+                    return
 
                 self._copy(start_date, source_workspace_id, dest_workspace_id, relevant_mapping[0])
 
     def fix(self):
-
         if self.args.dest_workspace is None:
             self._list_clients()
         else:
@@ -78,7 +95,7 @@ class TogglTools:
                     start_date = datetime.strptime(self.args.start_date, '%Y%m%d')
                 except ValueError:
                     print('Date not in YYYYMMDD format.')
-                    exit()
+                    return
                 self._fix(start_date, int(self.args.dest_workspace))
 
     def _list_clients(self):
@@ -104,9 +121,12 @@ class TogglTools:
 
         print(response)
 
-    def _get_ws_time_entries(self, start_date, workspace_id):
+    def _get_ws_time_entries(self, start_date, workspace_id, end_date=None):
         start_date_str = start_date.astimezone().isoformat()
-        end_date_str = datetime.now(timezone.utc).astimezone().isoformat()
+        if end_date is None:
+            end_date_str = datetime.now(timezone.utc).astimezone().isoformat()
+        else:
+            end_date_str = start_date_str
         request_url = 'https://www.toggl.com/api/v8/time_entries'
 
         response = self.toggl.request(endpoint=request_url,
@@ -128,11 +148,98 @@ class TogglTools:
     def _parse_response_date(date_string):
         return dateutil.parser.isoparse(date_string).astimezone()
 
+    @staticmethod
+    def _read_duration_str(duration_string):
+        return timedelta(seconds=timeparse(duration_string))
+
+    @staticmethod
+    def _represent_duration(td):
+        return str(td)
+
     def _get_projects(self, workspace_id):
         return {}
 
-    def _fix(self, start_date, dest_workspace_id):
+    def _split(self, date, workspace_id):
+        def _start_time_not_midnight(time_entry_dict):
+            parsed_start = self._parse_response_date(time_entry_dict['start'])
+            return 0 != (parsed_start - parsed_start.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
 
+        def _set_midnight_start(time_entry_dict):
+            print(time_entry_dict)
+
+            old_start = time_entry_dict['start']
+            old_stop = time_entry_dict['stop']
+            parsed_start = self._parse_response_date(old_start)
+            new_start = parsed_start.replace(hour=0, minute=0, second=0, microsecond=0)
+            duration_seconds = int(time_entry_dict['duration'])
+            new_stop = new_start + timedelta(seconds=duration_seconds)
+
+            time_entry_dict.update({'old_start': old_start,
+                                    'old_stop': old_stop,
+                                    'start': new_start.isoformat(),
+                                    'stop': new_stop.isoformat(),
+                                    'duronly': True,
+                                    'dur_calc': (new_stop - new_start).total_seconds()})
+            return time_entry_dict
+
+        list_entries = list(self._get_ws_time_entries(start_date=date, end_date=date, workspace_id=workspace_id))
+
+        print('Found the following entries:')
+        self._display_time_entries(list_entries)
+        proceed = input('\nEnter the entry # or anything else to cancel: ')
+        try:
+            idx = int(proceed)
+        except ValueError:
+            print('Stopping.')
+            return
+
+        if 0 <= idx < len(list_entries):
+            entry = list_entries[idx]
+        else:
+            print('Stopping.')
+            return
+
+        total_duration = timedelta(seconds=entry['duration'])
+        total_duration_repr = self._represent_duration(total_duration)
+        new_total_dur_repr = input(
+            'The total duration is {0}. What should the total duration for new entries be? [{0}]'
+                .format(total_duration_repr))
+        if new_total_dur_repr == '':
+            new_total_dur_repr = total_duration_repr
+        new_total_dur = self._read_duration_str(new_total_dur_repr)
+        print('The new total duration will be: {}'.format(self._represent_duration(new_total_dur)))
+
+        split_input = input('\nHow do you want to split the duration? Use x/y/z notation e.g. 1.4/2/1 [1]')
+        inputs = split_input.split('/')
+        new_proportions = []
+        for inp in inputs:
+            if inp.replace('.', '', 1).isdigit():
+                parsed = float(inp)
+                if str(parsed) == inp:
+                    new_proportions.append(parsed)
+                else:
+                    print('Parse error.')
+                    return
+            else:
+                print('Parse error.')
+                return
+        total_proportion = sum(new_proportions)
+        seconds = new_total_dur.total_seconds()
+        new_durations = list(map(
+            lambda prop: int(round(prop / total_proportion * seconds)),
+            new_proportions))
+        new_durations[0] += seconds - sum(new_durations)
+        # TODO:
+        # - output table with suggested durations
+        # - input descriptions for each
+        # - construct time entry objcets
+        # - submit to toggl
+        # - test
+
+        for entry in fixed_entries:
+            print(self.toggl.putTimeEntry(entry))
+
+    def _fix(self, start_date, dest_workspace_id):
         def _start_time_not_midnight(time_entry_dict):
             parsed_start = self._parse_response_date(time_entry_dict['start'])
             return 0 != (parsed_start - parsed_start.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
@@ -189,7 +296,7 @@ class TogglTools:
         source_time_entries = list(self._get_ws_time_entries(start_date, source_workspace_id))
         if len(source_time_entries) > 99:
             print('Too many time entries to get at once; choose a different start date.')
-            exit()
+            return
 
         # Get all the available projects from both workspaces (for names)
         source_projects = self._get_projects(source_workspace_id)
@@ -201,7 +308,7 @@ class TogglTools:
             source_project = pair['source_project']
             if source_project in mapping_lookup:
                 print('Multiple destination projects for source project {}.'.format(source_project))
-                exit()
+                return
             else:
                 # Update pair with project names
                 pair.update({
@@ -239,7 +346,7 @@ class TogglTools:
             print('Not all destination projects exist in workspace:')
             for mid in missing_ids:
                 print(mid)
-            exit()
+            return
 
         # Display the mappings to be applied (sorted by dest)
         '| {:50} --> {:50} |'.format('Source project', 'Destination project')
