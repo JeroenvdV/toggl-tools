@@ -6,7 +6,7 @@ import dateutil.parser
 from TogglPy import TogglPy
 from pytimeparse.timeparse import timeparse
 
-from .settings import YAMLSettings
+from settings import YAMLSettings
 
 
 class TogglTools:
@@ -140,9 +140,9 @@ class TogglTools:
     def _display_time_entries(self, entries):
         table_format = '| {:<3} | {:<11} | {:<25} | {:<8} | {:<75} |'
         print(table_format.format('#', 'id', 'Start', 'Duration', 'Description'))
-        for idx, entry in entries:
+        for idx, entry in enumerate(entries):
             start_time = self._parse_response_date(entry['start']).strftime('%a %x %X')
-            print(table_format.format(idx, entry['id'], start_time, entry['duration'], entry['description']))
+            print(table_format.format(idx, entry['id'] if (id in entry) else '-', start_time, entry['duration'], entry['description']))
 
     @staticmethod
     def _parse_response_date(date_string):
@@ -157,7 +157,12 @@ class TogglTools:
         return str(td)
 
     def _get_projects(self, workspace_id):
-        return {}
+        response = self.toggl.request('https://www.toggl.com/api/v8/workspaces/{}/projects'.format(workspace_id))
+
+        if isinstance(response, list):
+            return dict([(project['id'], project) for project in response])
+        else:
+            print('Error, response was: ' + response)
 
     def _split(self, date, workspace_id):
         def _start_time_not_midnight(time_entry_dict):
@@ -267,6 +272,7 @@ class TogglTools:
         bad_entries = list(filter(_start_time_not_midnight, ws_time_entries))
 
         print('Found the following entries to be changed:')
+        print(bad_entries)
         self._display_time_entries(bad_entries)
         proceed = input('\nType y to proceed [y/N]: ')
         if proceed != 'y':
@@ -320,6 +326,7 @@ class TogglTools:
         def _set_destination_pid(time_entry_dict):
             source_pid = time_entry_dict['pid']
             source_id = time_entry_dict['id']
+
             if source_pid not in mapping_lookup:
                 print('No mapped destination for time entry with project {} (id: {})'.format(
                     source_projects[source_pid], source_pid
@@ -332,9 +339,11 @@ class TogglTools:
                     'source_pid': source_pid,
                     'pid': mapping['dest_project'],
                     'source_project_name': mapping['source_project_name'],
-                    'dest_project_name': mapping['dest_project_name']
+                    'dest_project_name': mapping['dest_project_name'],
+                    'created_with': 'toggl-tools.py'
                 })
                 del time_entry_dict['id']
+                return time_entry_dict
 
         updated_entries = list(map(_set_destination_pid, source_time_entries))
 
@@ -349,8 +358,8 @@ class TogglTools:
             return
 
         # Display the mappings to be applied (sorted by dest)
-        '| {:50} --> {:50} |'.format('Source project', 'Destination project')
-        '| {:50} --> {:50} |'.format('({})'.format(source_workspace_id), '({})'.format(dest_workspace_id))
+        print('| {:50} --> {:50} |'.format('Source project', 'Destination project'))
+        print('| {:50} --> {:50} |'.format('({})'.format(source_workspace_id), '({})'.format(dest_workspace_id)))
         for dest in mapped_dest_projects:
             sources = set(map(
                 lambda te: (te['source_project_name'], te['dest_project_name']),
@@ -363,6 +372,29 @@ class TogglTools:
         # Aggregate total number of hours in source by project & in total, calculate expected total in dest and display.
 
         # Create all new time entries
+        print('Found the following entries to be changed:')
+        self._display_time_entries(source_time_entries)
+        proceed = input('\nType y to proceed [y/N]: ')
+        if proceed != 'y':
+            print('Stopping.')
+            return
+
+        # Show changes. TODO show destination project
+        print('The following changes will be made:')
+        table_format = '| {:<11} | {:<25} | {:<25} | {:<8} | {:<55} | {:<40} |'
+        print(
+            table_format.format('Source id', 'Start', 'Stop', 'Duration', 'Description', 'Destination project'))
+        for entry in updated_entries:
+            print(table_format.format(entry['source_id'], entry['start'], entry['stop'], entry['duration'],
+                                      entry['description'], entry['dest_project_name']))
+        proceed = input('\nType y to send to Toggl [y/N]: ')
+        if proceed != 'y':
+            print('Canceled.')
+            return
+
+        # Actually submit
+        for entry in updated_entries:
+            print(self.toggl.postTimeEntry(entry))
 
         # Get and calculate total number of hours in destination by getting all new time entry ids, and display per project.
 
